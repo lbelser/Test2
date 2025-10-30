@@ -1,0 +1,122 @@
+:root {
+  --bg-color: #f7f9fb;
+  --card-bg: #ffffff;
+  --accent: #0066ff;
+  --accent-soft: rgba(0, 102, 255, 0.1);
+  --text-primary: #1f2933;
+  --text-secondary: #52606d;
+  --border-radius: 12px;
+  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  background-color: var(--bg-color);
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.app-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+
+h1 {
+  font-weight: 700;
+  font-size: 2.2rem;
+  margin-bottom: 1.5rem;
+}
+
+section {
+  background-color: var(--card-bg);
+  border-radius: var(--border-radius);
+  padding: 1.5rem;
+  margin-top: 2rem;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+}
+
+section h2 {
+  font-size: 1.4rem;
+  margin-top: 0;
+  margin-bottom: 1rem;
+}
+
+.kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.kpi-card {
+  background-color: var(--card-bg);
+  border-radius: var(--border-radius);
+  padding: 1rem 1.2rem;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+  border-left: 4px solid var(--accent);
+}
+
+.kpi-title {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.kpi-value {
+  font-size: 1.8rem;
+  font-weight: 700;
+  margin-top: 0.4rem;
+}
+
+.kpi-subtitle {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  margin-top: 0.3rem;
+}
+
+.filter-row {
+  background-color: var(--card-bg);
+  border-radius: var(--border-radius);
+  padding: 1rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.06);
+}
+
+.filter-item label,
+.control-item label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+}
+
+.control-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  margin-bottom: 1rem;
+}
+
+.control-item {
+  min-width: 200px;
+  flex: 1;
+}
+
+.dash-graph {
+  background-color: #ffffff;
+  border-radius: var(--border-radius);
+  padding: 0.5rem;
+}
+
+@media (max-width: 768px) {
+  .app-container {
+    padding: 1.5rem 1rem 3rem;
+  }
+
+  .control-row {
+    flex-direction: column;
+  }
+}
+
