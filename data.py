@@ -8,7 +8,6 @@ Dash callbacks can focus on presentation logic.
 
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
@@ -40,47 +39,9 @@ def _slugify(column: str) -> str:
     return cleaned.strip("_")
 
 
-def _detect_separator(path: Path, sample_size: int = 32_768) -> str:
-    """Infer the delimiter used in a delimited text file."""
-
-    try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            sample = handle.read(sample_size)
-            handle.seek(0)
-            dialect = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", "|"])
-            return dialect.delimiter
-    except (OSError, csv.Error):
-        return ","
-
-
-def _read_csv(path: Path, **kwargs) -> pd.DataFrame:
-    """Wrapper around :func:`pandas.read_csv` with delimiter detection."""
-
-    sep = kwargs.pop("sep", None)
-    if sep is None:
-        sep = _detect_separator(path)
-    return pd.read_csv(path, sep=sep, encoding="utf-8-sig", **kwargs)
-
-
-def _coerce_date_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert object columns with date-like names to datetimes when possible."""
-
-    date_keywords = ("date", "time", "timestamp")
-    for column in df.columns:
-        if df[column].dtype != object:
-            continue
-        if not any(keyword in column.lower() for keyword in date_keywords):
-            continue
-        converted = pd.to_datetime(df[column], errors="coerce")
-        if converted.notna().any():
-            df[column] = converted
-    return df
-
-
 def _read_customers() -> pd.DataFrame:
-    customers = _read_csv(CUSTOMER_PATH, index_col=0)
+    customers = pd.read_csv(CUSTOMER_PATH, index_col=0)
     customers = customers.rename(columns=_slugify)
-    customers = _coerce_date_columns(customers)
 
     date_columns = ["enrollmentdateopening", "cancellationdate"]
     for column in date_columns:
@@ -128,9 +89,8 @@ def _read_customers() -> pd.DataFrame:
 
 
 def _read_flights() -> pd.DataFrame:
-    flights = _read_csv(FLIGHTS_PATH)
+    flights = pd.read_csv(FLIGHTS_PATH)
     flights = flights.rename(columns=_slugify)
-    flights = _coerce_date_columns(flights)
 
     if "yearmonthdate" in flights.columns:
         flights["year_month_date"] = pd.to_datetime(
@@ -163,7 +123,7 @@ def _read_metadata() -> Optional[pd.DataFrame]:
     if not METADATA_PATH.exists():
         return None
     try:
-        metadata = _read_csv(METADATA_PATH, header=None)
+        metadata = pd.read_csv(METADATA_PATH, header=None)
     except pd.errors.EmptyDataError:
         return None
     return metadata
