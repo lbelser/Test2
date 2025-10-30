@@ -13,9 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
 
-import logging
-import re
-
 import numpy as np
 import pandas as pd
 
@@ -26,174 +23,10 @@ FLIGHTS_PATH = REPO_ROOT / "DM_AIAI_FlightsDB.csv"
 METADATA_PATH = REPO_ROOT / "DM_AIAI_Metadata.csv"
 
 
-if not logging.getLogger().handlers:
-    logging.basicConfig(level=logging.INFO)
-
-LOGGER = logging.getLogger(__name__)
-
-COMMON_CSV_KWARGS = {
-    "dtype_backend": "numpy_nullable",
-    "low_memory": False,
-}
-
-DATA_SOURCES = {
-    "customers": {
-        "path": CUSTOMER_PATH,
-        "read_kwargs": {"index_col": 0},
-    },
-    "flights": {
-        "path": FLIGHTS_PATH,
-        "read_kwargs": {},
-    },
-    "metadata": {
-        "path": METADATA_PATH,
-        "read_kwargs": {"header": None},
-    },
-}
-
-CANDIDATE_DELIMITERS = [",", ";", "\t", "|"]
-
-
-def _sniff_delimiter(path: Path, sample_size: int = 4096) -> str:
-    """Attempt to detect the delimiter used in a CSV file."""
-
-    default = ","
-    try:
-        with path.open("r", newline="") as handle:
-            sample = handle.read(sample_size)
-            if not sample:
-                return default
-            handle.seek(0)
-            try:
-                dialect = csv.Sniffer().sniff(sample)
-            except csv.Error:
-                return default
-            delimiter = getattr(dialect, "delimiter", None)
-            return delimiter or default
-    except OSError:
-        return default
-
-
-def _peek_columns(path: Path, delimiter: str) -> list[str]:
-    """Return the header columns parsed with the provided delimiter."""
-
-    try:
-        with path.open("r", newline="") as handle:
-            reader = csv.reader(handle, delimiter=delimiter)
-            return next(reader)
-    except (OSError, StopIteration, csv.Error):
-        return []
-
-
-def _read_csv_with_autodelimiter(
-    path: Path, *, dataset_name: Optional[str] = None, **kwargs
-) -> pd.DataFrame:
-    """Read a CSV file using an auto-detected delimiter."""
-
-    dataset_label = dataset_name or path.name
-    forced_delimiter = kwargs.pop("delimiter", None)
-    delimiter = forced_delimiter or _sniff_delimiter(path)
-    header_columns = _peek_columns(path, delimiter)
-
-    if len(header_columns) <= 1:
-        # The detected delimiter likely failed; try common fallbacks.
-        for candidate in CANDIDATE_DELIMITERS:
-            if candidate == delimiter:
-                continue
-            candidate_columns = _peek_columns(path, candidate)
-            if len(candidate_columns) > len(header_columns):
-                LOGGER.info(
-                    "Delimiter %r for %s yielded %d columns; falling back to %r",
-                    delimiter,
-                    dataset_label,
-                    len(header_columns),
-                    candidate,
-                )
-                delimiter = candidate
-                header_columns = candidate_columns
-                break
-
-    LOGGER.info(
-        "Detected delimiter %r for %s with header columns: %s",
-        delimiter,
-        dataset_label,
-        header_columns,
-    )
-
-    read_kwargs = {**COMMON_CSV_KWARGS, **kwargs, "delimiter": delimiter}
-
-    try:
-        frame = pd.read_csv(path, **read_kwargs)
-    except TypeError as exc:
-        # ``dtype_backend`` is only available in pandas >= 2.0; retry without it
-        if "dtype_backend" in read_kwargs:
-            read_kwargs.pop("dtype_backend", None)
-            frame = pd.read_csv(path, **read_kwargs)
-        else:
-            raise exc
-
-    LOGGER.info(
-        "Loaded %s with columns: %s",
-        dataset_label,
-        list(frame.columns),
-    )
-    return frame
-
-
-def _read_dataset(name: str) -> pd.DataFrame:
-    """Load a named dataset using shared CSV settings."""
-
-    config = DATA_SOURCES[name]
-    read_kwargs = dict(config.get("read_kwargs", {}))
-    return _read_csv_with_autodelimiter(
-        config["path"], dataset_name=name, **read_kwargs
-    )
-
-
-DATE_NAME_PATTERNS = (
-    "date",
-    "timestamp",
-    "time",
-    "year_month",
-)
-
-
-def _coerce_datetime_columns(frame: pd.DataFrame) -> pd.DataFrame:
-    """Convert columns with date-like names or values to datetimes."""
-
-    result = frame.copy()
-
-    for column in result.columns:
-        series = result[column]
-        if not isinstance(series, pd.Series):
-            continue
-
-        name_hint = str(column).lower()
-        has_name_hint = any(token in name_hint for token in DATE_NAME_PATTERNS)
-
-        if not has_name_hint:
-            if not pd.api.types.is_object_dtype(series) and not pd.api.types.is_string_dtype(series):
-                continue
-            sample = series.dropna().astype(str).head(50)
-            if sample.empty:
-                continue
-            parsed_sample = pd.to_datetime(sample, errors="coerce", infer_datetime_format=True)
-            success_ratio = parsed_sample.notna().mean()
-            if success_ratio < 0.6:
-                continue
-
-        result[column] = pd.to_datetime(series, errors="coerce", infer_datetime_format=True)
-
-    return result
-
-
 def _slugify(column: str) -> str:
     """Convert raw column headers to snake_case identifiers."""
 
-    cleaned = str(column).strip()
-    # Insert underscores between camel-case transitions before other cleanup.
-    cleaned = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", cleaned)
-    cleaned = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", cleaned)
+    cleaned = column.strip()
     cleaned = cleaned.replace("#", "_id")
     cleaned = cleaned.replace("%", "pct")
     cleaned = cleaned.replace("/", "_")
@@ -207,15 +40,59 @@ def _slugify(column: str) -> str:
     return cleaned.strip("_")
 
 
+def _detect_separator(path: Path, sample_size: int = 32_768) -> str:
+    """Infer the delimiter used in a delimited text file."""
+
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            sample = handle.read(sample_size)
+            handle.seek(0)
+            dialect = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", "|"])
+            return dialect.delimiter
+    except (OSError, csv.Error):
+        return ","
+
+
+def _read_csv(path: Path, **kwargs) -> pd.DataFrame:
+    """Wrapper around :func:`pandas.read_csv` with delimiter detection."""
+
+    sep = kwargs.pop("sep", None)
+    if sep is None:
+        sep = _detect_separator(path)
+    return pd.read_csv(path, sep=sep, encoding="utf-8-sig", **kwargs)
+
+
+def _coerce_date_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert object columns with date-like names to datetimes when possible."""
+
+    date_keywords = ("date", "time", "timestamp")
+    for column in df.columns:
+        if df[column].dtype != object:
+            continue
+        if not any(keyword in column.lower() for keyword in date_keywords):
+            continue
+        converted = pd.to_datetime(df[column], errors="coerce")
+        if converted.notna().any():
+            df[column] = converted
+    return df
+
+
 def _read_customers() -> pd.DataFrame:
-    customers = _read_dataset("customers")
+    customers = _read_csv(CUSTOMER_PATH, index_col=0)
     customers = customers.rename(columns=_slugify)
-    customers = _coerce_datetime_columns(customers)
+    customers = _coerce_date_columns(customers)
+
+    date_columns = ["enrollmentdateopening", "cancellationdate"]
+    for column in date_columns:
+        if column in customers.columns:
+            customers[column] = pd.to_datetime(
+                customers[column], errors="coerce"
+            )
 
     customers = customers.rename(
         columns={
-            "enrollment_date_opening": "enrollment_date",
-            "cancellation_date": "cancellation_date",
+            "enrollmentdateopening": "enrollment_date",
+            "cancellationdate": "cancellation_date",
             "customer_lifetime_value": "customer_lifetime_value",
             "province_or_state": "province",
             "postal_code": "postal_code",
@@ -244,40 +121,25 @@ def _read_customers() -> pd.DataFrame:
         customers["tenure_days"], bins=tenure_bins, labels=tenure_labels, right=False
     )
 
-    numeric_columns = [
-        "income",
-        "customer_lifetime_value",
-        "age",
-        "latitude",
-        "longitude",
-    ]
-
-    for column in numeric_columns:
-        if column in customers.columns:
-            customers[column] = pd.to_numeric(customers[column], errors="coerce")
+    if "income" in customers.columns:
+        customers["income"] = pd.to_numeric(customers["income"], errors="coerce")
 
     return customers
 
 
 def _read_flights() -> pd.DataFrame:
-    flights = _read_dataset("flights")
+    flights = _read_csv(FLIGHTS_PATH)
     flights = flights.rename(columns=_slugify)
-    flights = _coerce_datetime_columns(flights)
+    flights = _coerce_date_columns(flights)
 
-    if "year_month_date" in flights.columns:
-        flights["year_month_date"] = pd.to_datetime(
-            flights["year_month_date"], errors="coerce"
-        )
-    elif "yearmonthdate" in flights.columns:
+    if "yearmonthdate" in flights.columns:
         flights["year_month_date"] = pd.to_datetime(
             flights["yearmonthdate"], errors="coerce"
         )
-    elif {"year", "month"}.issubset(flights.columns):
-        flights["year_month_date"] = pd.to_datetime(
-            flights[["year", "month"]].assign(day=1), errors="coerce"
-        )
     else:
-        flights["year_month_date"] = pd.NaT
+        flights["year_month_date"] = pd.to_datetime(
+            flights[["year", "month"]].assign(day=1)
+        )
 
     numeric_columns = [
         "num_flights",
@@ -292,10 +154,6 @@ def _read_flights() -> pd.DataFrame:
         if column in flights.columns:
             flights[column] = pd.to_numeric(flights[column], errors="coerce").fillna(0)
 
-    for column in ("year", "month"):
-        if column in flights.columns:
-            flights[column] = pd.to_numeric(flights[column], errors="coerce").astype("Int64")
-
     flights["year_month"] = flights["year_month_date"].dt.to_period("M")
 
     return flights
@@ -305,10 +163,10 @@ def _read_metadata() -> Optional[pd.DataFrame]:
     if not METADATA_PATH.exists():
         return None
     try:
-        metadata = _read_dataset("metadata")
+        metadata = _read_csv(METADATA_PATH, header=None)
     except pd.errors.EmptyDataError:
         return None
-    return _coerce_datetime_columns(metadata)
+    return metadata
 
 
 @dataclass
