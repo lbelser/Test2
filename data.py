@@ -8,6 +8,7 @@ Dash callbacks can focus on presentation logic.
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
@@ -20,6 +21,108 @@ REPO_ROOT = Path(__file__).resolve().parent
 CUSTOMER_PATH = REPO_ROOT / "DM_AIAI_CustomerDB.csv"
 FLIGHTS_PATH = REPO_ROOT / "DM_AIAI_FlightsDB.csv"
 METADATA_PATH = REPO_ROOT / "DM_AIAI_Metadata.csv"
+
+
+COMMON_CSV_KWARGS = {
+    "dtype_backend": "numpy_nullable",
+    "low_memory": False,
+}
+
+DATA_SOURCES = {
+    "customers": {
+        "path": CUSTOMER_PATH,
+        "read_kwargs": {"index_col": 0},
+    },
+    "flights": {
+        "path": FLIGHTS_PATH,
+        "read_kwargs": {},
+    },
+    "metadata": {
+        "path": METADATA_PATH,
+        "read_kwargs": {"header": None},
+    },
+}
+
+
+def _sniff_delimiter(path: Path, sample_size: int = 4096) -> str:
+    """Attempt to detect the delimiter used in a CSV file."""
+
+    default = ","
+    try:
+        with path.open("r", newline="") as handle:
+            sample = handle.read(sample_size)
+            if not sample:
+                return default
+            handle.seek(0)
+            try:
+                dialect = csv.Sniffer().sniff(sample)
+            except csv.Error:
+                return default
+            delimiter = getattr(dialect, "delimiter", None)
+            return delimiter or default
+    except OSError:
+        return default
+
+
+def _read_csv_with_autodelimiter(path: Path, **kwargs) -> pd.DataFrame:
+    """Read a CSV file using an auto-detected delimiter."""
+
+    delimiter = kwargs.pop("delimiter", None) or _sniff_delimiter(path)
+    read_kwargs = {**COMMON_CSV_KWARGS, **kwargs, "delimiter": delimiter}
+
+    try:
+        return pd.read_csv(path, **read_kwargs)
+    except TypeError as exc:
+        # ``dtype_backend`` is only available in pandas >= 2.0; retry without it
+        if "dtype_backend" in read_kwargs:
+            read_kwargs.pop("dtype_backend", None)
+            return pd.read_csv(path, **read_kwargs)
+        raise exc
+
+
+def _read_dataset(name: str) -> pd.DataFrame:
+    """Load a named dataset using shared CSV settings."""
+
+    config = DATA_SOURCES[name]
+    read_kwargs = dict(config.get("read_kwargs", {}))
+    return _read_csv_with_autodelimiter(config["path"], **read_kwargs)
+
+
+DATE_NAME_PATTERNS = (
+    "date",
+    "timestamp",
+    "time",
+    "year_month",
+)
+
+
+def _coerce_datetime_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Convert columns with date-like names or values to datetimes."""
+
+    result = frame.copy()
+
+    for column in result.columns:
+        series = result[column]
+        if not isinstance(series, pd.Series):
+            continue
+
+        name_hint = str(column).lower()
+        has_name_hint = any(token in name_hint for token in DATE_NAME_PATTERNS)
+
+        if not has_name_hint:
+            if not pd.api.types.is_object_dtype(series) and not pd.api.types.is_string_dtype(series):
+                continue
+            sample = series.dropna().astype(str).head(50)
+            if sample.empty:
+                continue
+            parsed_sample = pd.to_datetime(sample, errors="coerce", infer_datetime_format=True)
+            success_ratio = parsed_sample.notna().mean()
+            if success_ratio < 0.6:
+                continue
+
+        result[column] = pd.to_datetime(series, errors="coerce", infer_datetime_format=True)
+
+    return result
 
 
 def _slugify(column: str) -> str:
@@ -40,15 +143,9 @@ def _slugify(column: str) -> str:
 
 
 def _read_customers() -> pd.DataFrame:
-    customers = pd.read_csv(CUSTOMER_PATH, index_col=0)
+    customers = _read_dataset("customers")
     customers = customers.rename(columns=_slugify)
-
-    date_columns = ["enrollmentdateopening", "cancellationdate"]
-    for column in date_columns:
-        if column in customers.columns:
-            customers[column] = pd.to_datetime(
-                customers[column], errors="coerce"
-            )
+    customers = _coerce_datetime_columns(customers)
 
     customers = customers.rename(
         columns={
@@ -82,15 +179,25 @@ def _read_customers() -> pd.DataFrame:
         customers["tenure_days"], bins=tenure_bins, labels=tenure_labels, right=False
     )
 
-    if "income" in customers.columns:
-        customers["income"] = pd.to_numeric(customers["income"], errors="coerce")
+    numeric_columns = [
+        "income",
+        "customer_lifetime_value",
+        "age",
+        "latitude",
+        "longitude",
+    ]
+
+    for column in numeric_columns:
+        if column in customers.columns:
+            customers[column] = pd.to_numeric(customers[column], errors="coerce")
 
     return customers
 
 
 def _read_flights() -> pd.DataFrame:
-    flights = pd.read_csv(FLIGHTS_PATH)
+    flights = _read_dataset("flights")
     flights = flights.rename(columns=_slugify)
+    flights = _coerce_datetime_columns(flights)
 
     if "yearmonthdate" in flights.columns:
         flights["year_month_date"] = pd.to_datetime(
@@ -114,6 +221,10 @@ def _read_flights() -> pd.DataFrame:
         if column in flights.columns:
             flights[column] = pd.to_numeric(flights[column], errors="coerce").fillna(0)
 
+    for column in ("year", "month"):
+        if column in flights.columns:
+            flights[column] = pd.to_numeric(flights[column], errors="coerce").astype("Int64")
+
     flights["year_month"] = flights["year_month_date"].dt.to_period("M")
 
     return flights
@@ -123,10 +234,10 @@ def _read_metadata() -> Optional[pd.DataFrame]:
     if not METADATA_PATH.exists():
         return None
     try:
-        metadata = pd.read_csv(METADATA_PATH, header=None)
+        metadata = _read_dataset("metadata")
     except pd.errors.EmptyDataError:
         return None
-    return metadata
+    return _coerce_datetime_columns(metadata)
 
 
 @dataclass
